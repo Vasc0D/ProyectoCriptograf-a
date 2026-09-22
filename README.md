@@ -100,7 +100,8 @@ enlaces antes de extraer.
 
 ## Documentacion de seguridad
 
-- [Informe del proyecto](docs/INFORME.md)
+- [Informe escrito en Word](docs/Informe_Proyecto_Clave.docx)
+- [Informe en Markdown](docs/INFORME.md)
 - [Modelo de amenazas](docs/THREAT_MODEL.md)
 - [Operacion, TLS, backups y respuesta](docs/OPERATIONS.md)
 - [Politica de seguridad](SECURITY.md)
