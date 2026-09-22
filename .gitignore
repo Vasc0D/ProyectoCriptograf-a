@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# Configuration and secrets
+.env
+.env.*
+!.env.example
+*.secret
+*.token
+
+# Private keys, certificates and local key stores
+certs/*
+!.gitkeep
+*.key
+*.key.pem
+*.p12
+*.pfx
+*.jks
+.keys/
+
+# Runtime state, databases and audit exports
+data/
+logs/
+backups/
+restore-*/
+.restore/
+*.sqlite
+*.sqlite3
+*.db
+
+# Frontend dependencies/build output
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local tooling/OS
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+.DS_Store

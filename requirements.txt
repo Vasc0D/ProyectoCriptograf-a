@@ -1,0 +1,6 @@
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+argon2-cffi>=23.1,<26
+pytest>=9.0.3,<10
+httpx>=0.27,<1
+websockets>=12,<17

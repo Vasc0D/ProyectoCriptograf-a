@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Mensajería instantánea con cifrado de extremo a extremo">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+    <title>Clave — Mensajería segura</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Saltar al contenido principal</a>
+    <header class="site-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">⌁</span>
+        <span>Clave</span>
+      </div>
+        <span class="brand-subtitle">Mensajería cifrada, por diseño</span>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <div id="security-warning" class="alert alert-danger" role="alert" hidden>
+        <strong>Este navegador no ofrece las primitivas necesarias.</strong>
+        <span id="security-warning-text">Clave necesita X25519, Ed25519 y Web Crypto para cifrar los mensajes.</span>
+      </div>
+      <div id="global-alert" class="alert" role="status" aria-live="polite" hidden></div>
+
+      <section id="auth-view" class="auth-layout" aria-labelledby="auth-title">
+        <div class="intro-card">
+          <p class="eyebrow">Cifrado de extremo a extremo</p>
+          <h1 id="auth-title">El contenido de tus conversaciones,<br><em>solo para ustedes.</em></h1>
+          <p class="intro-copy">Las claves privadas se generan en este dispositivo y nunca se envían al servidor. Verifica la huella de cada contacto antes de escribirle.</p>
+          <div class="security-points">
+            <div class="security-point"><span aria-hidden="true">◈</span><span>X25519 + HKDF para acordar claves sin exponerlas</span></div>
+            <div class="security-point"><span aria-hidden="true">◉</span><span>Ed25519 para autenticar cada mensaje</span></div>
+            <div class="security-point"><span aria-hidden="true">▣</span><span>AES-GCM con una clave efímera por mensaje</span></div>
+          </div>
+        </div>
+
+        <div class="auth-card">
+          <div class="tabs" role="tablist" aria-label="Acceso a Clave">
+            <button id="login-tab" class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="login-panel">Iniciar sesión</button>
+            <button id="register-tab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="register-panel">Crear cuenta</button>
+          </div>
+
+          <form id="login-panel" class="auth-form" role="tabpanel" aria-labelledby="login-tab">
+            <h2>Te damos la bienvenida</h2>
+            <p class="muted">Inicia sesión desde el dispositivo que guarda tus claves.</p>
+            <label for="login-username">Usuario</label>
+            <input id="login-username" name="username" autocomplete="username" minlength="3" maxlength="64" required>
+            <label for="login-password">Contraseña</label>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" minlength="12" required>
+            <button class="button button-primary button-wide" type="submit">Entrar</button>
+            <p id="login-help" class="form-help">Las claves privadas no se recuperan desde el servidor.</p>
+          </form>
+
+          <form id="register-panel" class="auth-form" role="tabpanel" aria-labelledby="register-tab" hidden>
+            <h2>Crea tu identidad</h2>
+            <p class="muted">Tu identidad criptográfica se generará localmente.</p>
+            <label for="register-username">Usuario</label>
+            <input id="register-username" name="username" autocomplete="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]+" required>
+            <label for="register-password">Contraseña</label>
+            <input id="register-password" name="password" type="password" autocomplete="new-password" minlength="12" required>
+            <label for="register-password-confirm">Repite la contraseña</label>
+            <input id="register-password-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="12" required>
+            <button class="button button-primary button-wide" type="submit">Crear cuenta</button>
+            <p class="form-help">Usa al menos 12 caracteres. La contraseña se envía por HTTPS al backend para almacenar únicamente un hash Argon2id; nunca se guarda en texto plano.</p>
+          </form>
+        </div>
+      </section>
+
+      <section id="app-view" class="app-layout" hidden aria-labelledby="app-title">
+        <header class="app-toolbar">
+          <div>
+            <p class="eyebrow">Buzón cifrado</p>
+            <h1 id="app-title">Hola, <span id="current-username"></span></h1>
+          </div>
+          <div class="toolbar-actions">
+            <span id="connection-status" class="status-pill status-offline"><span class="status-dot" aria-hidden="true"></span><span>Desconectado</span></span>
+            <button id="logout-button" class="button button-quiet" type="button">Cerrar sesión</button>
+          </div>
+        </header>
+
+        <div class="messenger-shell">
+          <aside class="contacts-panel" aria-labelledby="contacts-title">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Personas</p>
+                <h2 id="contacts-title">Contactos</h2>
+              </div>
+              <button id="refresh-users" class="icon-button" type="button" aria-label="Actualizar contactos" title="Actualizar contactos">↻</button>
+            </div>
+            <label class="search-label" for="contact-search">Buscar contactos</label>
+            <input id="contact-search" class="search-input" type="search" placeholder="Nombre de usuario" autocomplete="off">
+            <div id="contacts-list" class="contacts-list" role="list" aria-live="polite">
+              <p class="empty-state">Cargando contactos…</p>
+            </div>
+            <div class="privacy-note">
+              <span class="privacy-icon" aria-hidden="true">⌾</span>
+              <p>El servidor entrega sobres cifrados, pero puede ver remitente, destinatario y tiempos de entrega.</p>
+            </div>
+          </aside>
+
+          <section class="chat-panel" aria-labelledby="chat-title">
+            <div id="no-chat-state" class="no-chat-state">
+              <div class="empty-mark" aria-hidden="true">⌁</div>
+              <h2>Elige un contacto</h2>
+              <p>Selecciona a alguien para consultar su huella y comenzar una conversación segura.</p>
+            </div>
+
+            <div id="active-chat" class="active-chat" hidden>
+              <header class="chat-header">
+                <div class="chat-person">
+                  <div id="chat-avatar" class="avatar" aria-hidden="true"></div>
+                  <div>
+                    <h2 id="chat-title"></h2>
+                    <p id="chat-key-status" class="chat-key-status">Consultando identidad…</p>
+                  </div>
+                </div>
+                <button id="show-fingerprint" class="button button-outline" type="button">Ver huella</button>
+              </header>
+
+              <div id="fingerprint-panel" class="fingerprint-panel" hidden>
+                <div class="fingerprint-heading">
+                  <div>
+                    <p class="eyebrow">Identidad del contacto</p>
+                    <h3>Huella de claves públicas</h3>
+                  </div>
+                  <button id="close-fingerprint" class="icon-button" type="button" aria-label="Cerrar huella">×</button>
+                </div>
+                <p id="fingerprint-description" class="muted">Compara esta huella con tu contacto por otro canal confiable.</p>
+                <code id="fingerprint-value" class="fingerprint-value">—</code>
+                <div id="fingerprint-action" class="fingerprint-action"></div>
+              </div>
+
+              <div id="message-list" class="message-list" role="log" aria-live="polite" aria-label="Mensajes"></div>
+              <div id="chat-alert" class="chat-alert" role="status" aria-live="polite" hidden></div>
+              <form id="message-form" class="message-form">
+                <label class="sr-only" for="message-input">Mensaje</label>
+                <textarea id="message-input" rows="1" maxlength="4000" placeholder="Escribe un mensaje cifrado…" autocomplete="off" disabled required></textarea>
+                <button id="send-button" class="button button-primary send-button" type="submit" disabled aria-label="Cifrar y enviar mensaje">Enviar <span aria-hidden="true">↗</span></button>
+              </form>
+              <p class="composer-note"><span aria-hidden="true">▣</span> Se cifra en tu dispositivo antes de enviarse.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">Clave · Prototipo académico de seguridad y ética de datos</footer>
+  </body>
+</html>
