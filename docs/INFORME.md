@@ -74,8 +74,9 @@ que el token apareciera en la URL o en registros de acceso. Segundo, las claves
 privadas se cifran con AES-256-GCM antes de guardarse en IndexedDB; la clave de
 protección se deriva de la contraseña con PBKDF2-SHA-256 y 310 000 iteraciones.
 Al iniciar sesión se descifran en memoria y se importan como objetos `CryptoKey`
-no extraíbles. Esto evita un problema de Safari al persistir directamente
-claves X25519 no extraíbles. Tercero, el cliente valida que las claves privadas
+no extraíbles. Este diseño evita depender de que el navegador pueda persistir
+directamente objetos criptográficos no extraíbles y mantiene el material
+privado cifrado en reposo. Tercero, el cliente valida que las claves privadas
 recuperadas correspondan a las claves públicas registradas. Los ajustes
 surgieron al revisar el flujo completo y no solo el algoritmo de cifrado.
 
