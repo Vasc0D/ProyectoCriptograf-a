@@ -11,7 +11,7 @@ solo recibe sobres cifrados y metadatos de entrega.
 - Registro e inicio de sesion con contrasenas procesadas mediante Argon2id.
 - X25519 + HKDF-SHA-256 + AES-256-GCM para cifrar cada mensaje.
 - Firmas Ed25519 y un formato canonico firmado para autenticar los sobres.
-- Claves privadas no extraibles guardadas como `CryptoKey` en IndexedDB.
+- Claves privadas cifradas localmente con PBKDF2-SHA-256 (310 000 iteraciones) y AES-256-GCM antes de guardarse en IndexedDB. Al iniciar sesión se importan en memoria como `CryptoKey` no extraíbles.
 - Pinning TOFU y verificacion manual de huellas por un canal independiente.
 - WebSocket autenticado, mensajes asincronos y entrega *at-least-once* con ACK.
 - SQLite para usuarios, claves publicas, sobres cifrados y auditoria sanitizada.

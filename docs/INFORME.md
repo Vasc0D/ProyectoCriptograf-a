@@ -68,12 +68,16 @@ completo de un mensaje y después los controles que protegen cada etapa.
    comprobaciones de seguridad. El resultado fue un recorrido de demostración
    reproducible con siete pruebas automatizadas aprobadas.
 
-Durante la ejecución se hicieron dos ajustes relevantes. Primero, la
+Durante la ejecución se hicieron tres ajustes relevantes. Primero, la
 autenticación del WebSocket pasó al primer mensaje de la conexión para evitar
 que el token apareciera en la URL o en registros de acceso. Segundo, las claves
-privadas se almacenaron como objetos `CryptoKey` no extraíbles en IndexedDB, en
-lugar de exportarlas como texto. Ambos cambios surgieron al revisar el flujo
-completo y no solo el algoritmo de cifrado.
+privadas se cifran con AES-256-GCM antes de guardarse en IndexedDB; la clave de
+protección se deriva de la contraseña con PBKDF2-SHA-256 y 310 000 iteraciones.
+Al iniciar sesión se descifran en memoria y se importan como objetos `CryptoKey`
+no extraíbles. Esto evita un problema de Safari al persistir directamente
+claves X25519 no extraíbles. Tercero, el cliente valida que las claves privadas
+recuperadas correspondan a las claves públicas registradas. Los ajustes
+surgieron al revisar el flujo completo y no solo el algoritmo de cifrado.
 
 ## 3 Trasfondo teórico
 
@@ -129,7 +133,7 @@ esas acciones pueden considerarse protegidas.
 | ID | Requisito | Cumplimiento |
 |---|---|---|
 | S1 | El servidor no debe recibir mensajes en texto claro | El cifrado y descifrado ocurren en el navegador |
-| S2 | Las claves privadas no deben salir del dispositivo | Se crean como `CryptoKey` no extraíbles en IndexedDB |
+| S2 | Las claves privadas no deben salir del dispositivo | Se guardan cifradas en IndexedDB y se importan como `CryptoKey` no extraíbles solo en memoria |
 | S3 | La modificación de un sobre debe detectarse | AES-GCM y Ed25519 validan contenido y campos firmados |
 | S4 | La sustitución de una clave debe ser visible | La huella queda fijada y un cambio bloquea el envío |
 | S5 | Las contraseñas no deben almacenarse directamente | El backend guarda hashes Argon2id |
@@ -159,8 +163,9 @@ la seguridad no dependa de mensajes de consola.
 1. El navegador genera los pares X25519 y Ed25519.
 2. La persona registra su cuenta a través de TLS.
 3. El backend almacena el hash Argon2id y las claves públicas.
-4. Las claves privadas permanecen en IndexedDB como no extraíbles.
-5. Antes de conversar, los usuarios comparan sus huellas por un canal distinto.
+4. El cliente cifra las claves privadas con una clave derivada de la contraseña y guarda el paquete cifrado en IndexedDB.
+5. Al iniciar sesión, el cliente descifra el paquete en memoria y reimporta las claves como no extraíbles.
+6. Antes de conversar, los usuarios comparan sus huellas por un canal distinto.
 
 ### 5.2 Flujo de un mensaje
 
@@ -184,7 +189,9 @@ sesiones se implementan en `app/auth.py`; los modelos de persistencia se
 encuentran en `app/db.py`; y la API, validaciones y WebSocket se coordinan desde
 `app/main.py`. El frontend usa HTML, CSS y JavaScript sin frameworks externos.
 La criptografía se ejecuta con Web Crypto y el estado local se conserva en
-IndexedDB.
+IndexedDB. Las claves privadas quedan cifradas con AES-256-GCM y una clave
+derivada de la contraseña mediante PBKDF2-SHA-256; solo se descifran en memoria
+durante la sesión.
 
 El repositorio incluye configuración para ejecutar el servicio directamente o
 en Docker. El contenedor usa un usuario sin privilegios y un sistema de archivos

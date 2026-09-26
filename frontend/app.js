@@ -3,7 +3,14 @@
 "use strict";
 
 const DB_NAME = "clave-e2ee-v1";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+// Safari/WebKit has had failures storing CryptoKey-bearing objects in an
+// inline-keyPath object store. Keep identity records in an out-of-line store
+// and pass the username explicitly to put().
+const IDENTITY_STORE = "identity_records";
+const IDENTITY_RECORD_VERSION = 1;
+const LOCAL_KDF = "PBKDF2-SHA-256";
+const LOCAL_KDF_ITERATIONS = 310000;
 const MAX_MESSAGE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const ALGORITHM_LABEL = "X25519-HKDF-SHA256-AES-256-GCM-Ed25519";
@@ -39,11 +46,21 @@ async function init() {
   dbPromise = openDatabase();
   try {
     await dbPromise;
+    await migrateLegacyIdentities();
     state.dbReady = true;
   } catch (error) {
     setGlobalAlert("No se pudo abrir el almacén local de claves. Usa un perfil normal del navegador y vuelve a intentarlo.", "danger");
   }
   await detectCryptoSupport();
+  if (state.cryptoReady && state.dbReady) {
+    try {
+      await verifyEncryptedIdentityPersistence();
+    } catch (error) {
+      state.dbReady = false;
+      updateAuthControls();
+      setGlobalAlert("Este navegador no pudo verificar el almacenamiento cifrado local. No se registró la cuenta; actualiza Safari o usa otro navegador compatible.", "danger");
+    }
+  }
 }
 
 function cacheDom() {
@@ -123,8 +140,8 @@ function updateAuthControls() {
   }
 }
 
-// IndexedDB keeps CryptoKey objects directly. Private keys are generated non-extractable
-// and are never converted to base64 or sent in a request.
+// IndexedDB keeps only encrypted private material and public metadata. Private
+// keys are imported as non-extractable CryptoKeys in memory and never sent in a request.
 function openDatabase() {
   return new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) {
@@ -134,7 +151,10 @@ function openDatabase() {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
-      if (!database.objectStoreNames.contains("identities")) database.createObjectStore("identities", { keyPath: "username" });
+      // New databases use an out-of-line key for identities. Existing v1
+      // inline-keyPath data is retained; only already-encrypted records are
+      // eligible for migration after opening.
+      if (!database.objectStoreNames.contains(IDENTITY_STORE)) database.createObjectStore(IDENTITY_STORE);
       if (!database.objectStoreNames.contains("peers")) database.createObjectStore("peers", { keyPath: "username" });
       if (!database.objectStoreNames.contains("replay")) database.createObjectStore("replay", { keyPath: "id" });
     };
@@ -153,15 +173,93 @@ async function idbGet(storeName, key) {
   });
 }
 
-async function idbPut(storeName, value) {
+async function idbPut(storeName, value, key) {
   const database = await dbPromise;
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(storeName, "readwrite");
-    transaction.objectStore(storeName).put(value);
+    const store = transaction.objectStore(storeName);
+    if (key === undefined) store.put(value);
+    else store.put(value, key);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error || new Error("Transacción abortada."));
   });
+}
+
+async function idbDelete(storeName, key) {
+  const database = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(storeName, "readwrite");
+    transaction.objectStore(storeName).delete(key);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error || new Error("Transacción abortada."));
+  });
+}
+
+async function idbGetAll(storeName) {
+  const database = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(storeName, "readonly");
+    const request = transaction.objectStore(storeName).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function migrateLegacyIdentities() {
+  const database = await dbPromise;
+  if (!database.objectStoreNames.contains("identities")) return;
+  try {
+    const legacyRecords = await idbGetAll("identities");
+    for (const record of legacyRecords) {
+      // v1 records contained CryptoKey objects directly. They cannot be
+      // safely converted to encrypted JWKs when the keys are non-extractable;
+      // leave them untouched instead of copying insecure/invalid data.
+      if (!isEncryptedIdentityRecord(record)) continue;
+      const existing = await idbGet(IDENTITY_STORE, record.username);
+      if (!existing) await idbPut(IDENTITY_STORE, record, record.username);
+    }
+  } catch (error) {
+    // A legacy record must not prevent a fresh registration from using the
+    // fixed store. Login has a read fallback for this migration edge case.
+    console.warn("No se pudieron migrar identidades legacy", error);
+  }
+}
+
+async function getStoredIdentity(username) {
+  const database = await dbPromise;
+  const current = await idbGet(IDENTITY_STORE, username);
+  if (isEncryptedIdentityRecord(current)) return current;
+  if (database.objectStoreNames.contains("identities")) {
+    const legacy = await idbGet("identities", username);
+    if (isEncryptedIdentityRecord(legacy)) return legacy;
+  }
+  return undefined;
+}
+
+async function verifyEncryptedIdentityPersistence() {
+  const probeId = `__idb_probe__${makeMessageId()}`;
+  const probe = {
+    recordVersion: IDENTITY_RECORD_VERSION,
+    username: probeId,
+    exchangePublic: bytesToBase64(randomBytes(32)),
+    signingPublic: bytesToBase64(randomBytes(32)),
+    kdf: LOCAL_KDF,
+    kdfIterations: LOCAL_KDF_ITERATIONS,
+    privateSalt: bytesToBase64(randomBytes(16)),
+    privateIv: bytesToBase64(randomBytes(12)),
+    privateCiphertext: bytesToBase64(randomBytes(32)),
+  };
+  await idbPut(IDENTITY_STORE, probe, probeId);
+  try {
+    const restored = await idbGet(IDENTITY_STORE, probeId);
+    if (!isEncryptedIdentityRecord(restored)) {
+      throw new Error("El registro cifrado no fue restaurado correctamente.");
+    }
+  } finally {
+    await idbDelete(IDENTITY_STORE, probeId);
+  }
 }
 
 function utf8(value) {
@@ -197,6 +295,147 @@ function makeMessageId() {
   return bytesToBase64(randomBytes(16)).replaceAll("/", "_").replaceAll("+", "-").replaceAll("=", "");
 }
 
+function base64UrlToBytes(value) {
+  if (typeof value !== "string" || !value) throw new Error("JWK público inválido.");
+  const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
+  return base64ToBytes(`${base64}${"=".repeat((4 - (base64.length % 4)) % 4)}`);
+}
+
+function bytesEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function identityAssociatedData(record) {
+  return JSON.stringify({
+    recordVersion: record.recordVersion,
+    username: record.username,
+    exchangePublic: record.exchangePublic,
+    signingPublic: record.signingPublic,
+    kdf: record.kdf,
+    kdfIterations: record.kdfIterations,
+  });
+}
+
+function isEncryptedIdentityRecord(record) {
+  return Boolean(
+    record &&
+    record.recordVersion === IDENTITY_RECORD_VERSION &&
+    typeof record.username === "string" && record.username.length > 0 &&
+    typeof record.exchangePublic === "string" &&
+    typeof record.signingPublic === "string" &&
+    record.kdf === LOCAL_KDF &&
+    Number.isInteger(record.kdfIterations) &&
+    record.kdfIterations >= 100000 && record.kdfIterations <= 2000000 &&
+    typeof record.privateSalt === "string" &&
+    typeof record.privateIv === "string" &&
+    typeof record.privateCiphertext === "string",
+  );
+}
+
+async function deriveLocalIdentityKey(password, salt, usages, iterations = LOCAL_KDF_ITERATIONS) {
+  const passwordKey = await crypto.subtle.importKey("raw", utf8(password), { name: "PBKDF2" }, false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+    passwordKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    usages,
+  );
+}
+
+async function createEncryptedIdentityRecord(username, password, exchangePrivateJwk, signingPrivateJwk, exchangePublic, signingPublic) {
+  const record = {
+    recordVersion: IDENTITY_RECORD_VERSION,
+    username,
+    exchangePublic,
+    signingPublic,
+    kdf: LOCAL_KDF,
+    kdfIterations: LOCAL_KDF_ITERATIONS,
+    privateSalt: bytesToBase64(randomBytes(16)),
+    privateIv: bytesToBase64(randomBytes(12)),
+  };
+  const key = await deriveLocalIdentityKey(password, base64ToBytes(record.privateSalt), ["encrypt", "decrypt"]);
+  const privateMaterial = JSON.stringify({
+    version: IDENTITY_RECORD_VERSION,
+    exchange_private_jwk: exchangePrivateJwk,
+    signing_private_jwk: signingPrivateJwk,
+  });
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: base64ToBytes(record.privateIv),
+      additionalData: utf8(identityAssociatedData(record)),
+    },
+    key,
+    utf8(privateMaterial),
+  );
+  return { ...record, privateCiphertext: bytesToBase64(ciphertext) };
+}
+
+function validatePrivateJwk(jwk, expectedPublic) {
+  if (!jwk || jwk.kty !== "OKP" || typeof jwk.x !== "string" || typeof jwk.d !== "string") {
+    throw new Error("Material privado inválido.");
+  }
+  if (!bytesEqual(base64UrlToBytes(jwk.x), base64ToBytes(expectedPublic))) {
+    throw new Error("La clave privada no corresponde a la clave pública fijada.");
+  }
+}
+
+async function importRuntimeIdentity(record, exchangePrivateJwk, signingPrivateJwk) {
+  validatePrivateJwk(exchangePrivateJwk, record.exchangePublic);
+  validatePrivateJwk(signingPrivateJwk, record.signingPublic);
+  const exchangePrivate = await crypto.subtle.importKey(
+    "jwk",
+    exchangePrivateJwk,
+    { name: "X25519" },
+    false,
+    ["deriveBits"],
+  );
+  const signingPrivate = await crypto.subtle.importKey(
+    "jwk",
+    signingPrivateJwk,
+    { name: "Ed25519" },
+    false,
+    ["sign"],
+  );
+  if (exchangePrivate.extractable || signingPrivate.extractable) {
+    throw new Error("Las claves privadas locales deben ser no extraíbles.");
+  }
+  return {
+    username: record.username,
+    exchangePrivate,
+    signingPrivate,
+    exchangePublic: record.exchangePublic,
+    signingPublic: record.signingPublic,
+  };
+}
+
+async function openIdentityRecord(record, password) {
+  if (!isEncryptedIdentityRecord(record)) {
+    throw new Error("La identidad local no tiene un formato cifrado compatible.");
+  }
+  try {
+    const key = await deriveLocalIdentityKey(password, base64ToBytes(record.privateSalt), ["decrypt"], record.kdfIterations);
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64ToBytes(record.privateIv),
+        additionalData: utf8(identityAssociatedData(record)),
+      },
+      key,
+      base64ToBytes(record.privateCiphertext),
+    );
+    const privateMaterial = JSON.parse(new TextDecoder().decode(plaintext));
+    if (privateMaterial.version !== IDENTITY_RECORD_VERSION) throw new Error("Versión de claves no compatible.");
+    return importRuntimeIdentity(record, privateMaterial.exchange_private_jwk, privateMaterial.signing_private_jwk);
+  } catch {
+    throw new Error("No se pudieron desbloquear las claves privadas locales. Comprueba la contraseña o si los datos fueron alterados.");
+  }
+}
+
 function canonicalEnvelope(envelope) {
   // Keep this order stable: it is the authenticated representation shared by both clients.
   return JSON.stringify({
@@ -213,17 +452,25 @@ function canonicalEnvelope(envelope) {
   });
 }
 
-async function generateIdentity(username) {
-  const exchange = await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
-  const signing = await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]);
+async function generateIdentity(username, password) {
+  // Extractability is temporary: private JWKs are exported only to create the
+  // encrypted local record, then immediately re-imported as non-extractable.
+  const exchange = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+  const signing = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
   const exchangePublic = bytesToBase64(await crypto.subtle.exportKey("raw", exchange.publicKey));
   const signingPublic = bytesToBase64(await crypto.subtle.exportKey("raw", signing.publicKey));
-  return {
+  const exchangePrivateJwk = await crypto.subtle.exportKey("jwk", exchange.privateKey);
+  const signingPrivateJwk = await crypto.subtle.exportKey("jwk", signing.privateKey);
+  const record = await createEncryptedIdentityRecord(
     username,
-    exchangePrivate: exchange.privateKey,
-    signingPrivate: signing.privateKey,
-    exchangePublic: exchangePublic,
-    signingPublic: signingPublic,
+    password,
+    exchangePrivateJwk,
+    signingPrivateJwk,
+    exchangePublic,
+    signingPublic,
+  );
+  return {
+    record,
   };
 }
 
@@ -379,8 +626,9 @@ async function handleLogin(event) {
       const response = await api("/api/login", { method: "POST", auth: false, body: { username, password } });
       const token = response.token || response.access_token;
       if (!token) throw new Error("El servidor no devolvió un token de sesión.");
-      const identity = await idbGet("identities", username);
-      if (!identity) throw new Error("Esta cuenta no tiene claves privadas en este dispositivo. Regístrate aquí o recupera una copia segura de la identidad.");
+      const identityRecord = await getStoredIdentity(username);
+      if (!identityRecord) throw new Error("Esta cuenta no tiene una identidad cifrada en este dispositivo. Regístrate aquí o recupera una copia segura de la identidad.");
+      const identity = await openIdentityRecord(identityRecord, password);
       state.token = token;
       state.username = username;
       state.identity = identity;
@@ -395,7 +643,10 @@ async function handleLogin(event) {
 async function handleRegister(event) {
   event.preventDefault();
   if (!state.cryptoReady || !state.dbReady) return;
-  const form = new FormData(event.currentTarget);
+  // Event.currentTarget is cleared after event dispatch in Chromium. Keep the
+  // form reference before awaiting key generation, API and IndexedDB work.
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const username = String(form.get("username") || "").trim();
   const password = String(form.get("password") || "");
   const confirmation = String(form.get("password_confirm") || "");
@@ -409,23 +660,35 @@ async function handleRegister(event) {
   }
   await withButtonBusy(event.submitter, async () => {
     try {
-      const identity = await generateIdentity(username);
-      await api("/api/register", {
+      const identity = await generateIdentity(username, password);
+      const response = await api("/api/register", {
         method: "POST",
         auth: false,
         body: {
           username,
           password,
-          exchange_public_key: identity.exchangePublic,
-          signing_public_key: identity.signingPublic,
+          exchange_public_key: identity.record.exchangePublic,
+          signing_public_key: identity.record.signingPublic,
         },
       });
-      await idbPut("identities", identity);
-      event.currentTarget.reset();
-      setAuthTab("login");
-      document.getElementById("login-username").value = username;
-      setGlobalAlert("Cuenta creada. Ya puedes iniciar sesión desde este dispositivo.", "success");
+      const token = response.token || response.access_token;
+      if (!token) throw new Error("La cuenta se creó, pero el backend no devolvió un token de sesión.");
+      try {
+        await idbPut(IDENTITY_STORE, identity.record, username);
+      } catch {
+        throw new Error("La cuenta fue creada en el servidor, pero no se pudieron guardar las claves cifradas en este dispositivo.");
+      }
+      const runtimeIdentity = await openIdentityRecord(identity.record, password);
+      state.token = token;
+      state.username = username;
+      state.identity = runtimeIdentity;
+      formElement.reset();
+      await enterApp();
+      if (isSocketOpen()) setGlobalAlert("Cuenta creada y sesión iniciada. Ya puedes usar la mensajería cifrada.", "success");
     } catch (error) {
+      state.token = null;
+      state.username = null;
+      state.identity = null;
       setGlobalAlert(humanError(error), "danger");
     }
   });
@@ -494,6 +757,7 @@ function renderContacts() {
     const meta = document.createElement("span");
     meta.className = "contact-meta";
     const peer = state.peers.get(user.username);
+    meta.classList.toggle("contact-meta-verified", Boolean(peer?.verified));
     meta.textContent = peer?.verified ? "Huella verificada" : "Huella pendiente";
     info.append(name, meta);
     button.append(avatar, info);
@@ -536,6 +800,7 @@ function renderActivePeer() {
   dom["fingerprint-description"].textContent = peer.verified
     ? "Esta identidad está fijada localmente y fue marcada como verificada por ti."
     : "Compara esta huella con tu contacto por otro canal confiable antes de marcarla como verificada.";
+  dom["fingerprint-description"].classList.toggle("fingerprint-description-verified", peer.verified);
   renderFingerprintAction();
 }
 
@@ -545,7 +810,7 @@ function renderFingerprintAction() {
   if (!peer) return;
   if (peer.verified) {
     const text = document.createElement("p");
-    text.className = "muted";
+    text.className = "fingerprint-verified";
     text.textContent = "✓ Verificada en este dispositivo. Si cambia, el envío se bloqueará.";
     dom["fingerprint-action"].append(text);
     return;
@@ -877,7 +1142,8 @@ function clearGlobalAlert() {
 }
 
 function showChatAlert(message, type = "danger") {
-  dom["chat-alert"].className = `chat-alert ${type === "success" ? "alert-success" : ""}`;
+  const semanticType = ["success", "warning", "danger"].includes(type) ? type : "danger";
+  dom["chat-alert"].className = `chat-alert chat-alert-${semanticType}`;
   dom["chat-alert"].textContent = message;
   dom["chat-alert"].hidden = false;
 }
